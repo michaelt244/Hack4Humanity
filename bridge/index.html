@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>SightLine Bridge</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0a;
+      color: #f0f0f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100dvh;
+      padding: 24px 16px;
+      gap: 20px;
+    }
+
+    header { text-align: center; }
+    h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.5px; }
+    h1 span { color: #6ee7b7; }
+    .subtitle { font-size: 0.85rem; color: #888; margin-top: 4px; }
+
+    /* Status badge */
+    #status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 999px;
+      padding: 6px 16px;
+      font-size: 0.8rem;
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #555;
+      transition: background 0.3s;
+    }
+    .dot.connected { background: #6ee7b7; }
+    .dot.error     { background: #f87171; }
+
+    /* Description card */
+    #description-card {
+      width: 100%;
+      max-width: 480px;
+      background: #141414;
+      border: 1px solid #222;
+      border-radius: 16px;
+      padding: 20px;
+      min-height: 120px;
+    }
+    #description-text {
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: #e5e7eb;
+    }
+    #safety-alerts {
+      margin-top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .alert-badge {
+      background: #7f1d1d;
+      color: #fca5a5;
+      border-radius: 999px;
+      padding: 3px 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* Controls */
+    .controls {
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* Mode selector */
+    .mode-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .mode-btn {
+      flex: 1;
+      min-width: 70px;
+      padding: 8px 4px;
+      border-radius: 10px;
+      border: 1px solid #333;
+      background: #1a1a1a;
+      color: #aaa;
+      font-size: 0.78rem;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s;
+    }
+    .mode-btn.active {
+      border-color: #6ee7b7;
+      color: #6ee7b7;
+      background: #0d2b22;
+    }
+
+    /* Camera / mic buttons */
+    .btn-row {
+      display: flex;
+      gap: 12px;
+    }
+    button.primary {
+      flex: 1;
+      padding: 16px;
+      border-radius: 14px;
+      border: none;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    button.primary:active { transform: scale(0.97); }
+    button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #btn-snap   { background: #6ee7b7; color: #0a0a0a; }
+    #btn-ask    { background: #818cf8; color: #fff; }
+    #btn-stream { background: #1a1a1a; border: 1px solid #333; color: #aaa; font-size: 0.85rem; }
+
+    /* Q&A input */
+    .qa-row {
+      display: flex;
+      gap: 8px;
+    }
+    #question-input {
+      flex: 1;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid #333;
+      background: #1a1a1a;
+      color: #f0f0f0;
+      font-size: 0.95rem;
+      outline: none;
+    }
+    #question-input:focus { border-color: #818cf8; }
+
+    /* Log */
+    #log {
+      width: 100%;
+      max-width: 480px;
+      background: #0d0d0d;
+      border: 1px solid #1e1e1e;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: #555;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+
+    /* Hidden video/canvas for camera capture */
+    #camera-video, #camera-canvas { display: none; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Sight<span>Line</span></h1>
+    <p class="subtitle">AI eyes for Meta glasses</p>
+  </header>
+
+  <div id="status">
+    <span class="dot" id="dot"></span>
+    <span id="status-text">Connecting...</span>
+  </div>
+
+  <!-- Latest description -->
+  <div id="description-card">
+    <p id="description-text">Waiting for first frame...</p>
+    <div id="safety-alerts"></div>
+  </div>
+
+  <div class="controls">
+    <!-- Mode selector -->
+    <div class="mode-row">
+      <div class="mode-btn active" data-mode="general">General</div>
+      <div class="mode-btn" data-mode="safety">Safety</div>
+      <div class="mode-btn" data-mode="navigation">Navigate</div>
+      <div class="mode-btn" data-mode="ocr">Read text</div>
+    </div>
+
+    <!-- Primary actions -->
+    <div class="btn-row">
+      <button class="primary" id="btn-snap">📸 Describe now</button>
+      <button class="primary" id="btn-stream">▶ Auto stream</button>
+    </div>
+
+    <!-- Q&A -->
+    <div class="qa-row">
+      <input type="text" id="question-input" placeholder="Ask a question about the scene..." />
+      <button class="primary" id="btn-ask" style="flex:0;padding:12px 18px">Ask</button>
+    </div>
+  </div>
+
+  <!-- Debug log -->
+  <div id="log">— log —</div>
+
+  <!-- Hidden camera elements -->
+  <video id="camera-video" autoplay playsinline muted></video>
+  <canvas id="camera-canvas"></canvas>
+
+  <audio id="audio-player" autoplay></audio>
+
+  <script>
+    // ── Config ────────────────────────────────────────────────────────────────
+    const BACKEND_WS  = `ws://${location.host}/ws/stream`;
+    const BACKEND_HTTP = `http://${location.host}`;
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    let ws = null;
+    let mode = 'general';
+    let streaming = false;
+    let streamTimer = null;
+    let cameraStream = null;
+    let lastImageB64 = null;
+
+    // ── DOM refs ──────────────────────────────────────────────────────────────
+    const dot            = document.getElementById('dot');
+    const statusText     = document.getElementById('status-text');
+    const descText       = document.getElementById('description-text');
+    const alertsEl       = document.getElementById('safety-alerts');
+    const logEl          = document.getElementById('log');
+    const btnSnap        = document.getElementById('btn-snap');
+    const btnStream      = document.getElementById('btn-stream');
+    const btnAsk         = document.getElementById('btn-ask');
+    const questionInput  = document.getElementById('question-input');
+    const video          = document.getElementById('camera-video');
+    const canvas         = document.getElementById('camera-canvas');
+    const audioPlayer    = document.getElementById('audio-player');
+
+    // ── Logging ───────────────────────────────────────────────────────────────
+    function log(msg) {
+      const line = document.createElement('div');
+      line.textContent = `${new Date().toLocaleTimeString()} ${msg}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // ── WebSocket ─────────────────────────────────────────────────────────────
+    function connectWS() {
+      ws = new WebSocket(BACKEND_WS);
+
+      ws.onopen = () => {
+        dot.className = 'dot connected';
+        statusText.textContent = 'Connected';
+        log('WebSocket connected');
+      };
+
+      ws.onclose = () => {
+        dot.className = 'dot error';
+        statusText.textContent = 'Disconnected — retrying in 3s';
+        log('WebSocket closed, reconnecting...');
+        setTimeout(connectWS, 3000);
+      };
+
+      ws.onerror = (e) => {
+        log('WebSocket error');
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === 'description') {
+          descText.textContent = msg.text;
+          renderAlerts(msg.safety_alerts || []);
+          log(`Description received (${msg.text.length} chars)`);
+          speakText(msg.text);
+        } else if (msg.type === 'answer') {
+          descText.textContent = msg.text;
+          log(`Answer: ${msg.text.substring(0, 60)}...`);
+          speakText(msg.text);
+        } else if (msg.type === 'error') {
+          log(`Error: ${msg.message}`);
+        }
+      };
+    }
+
+    function renderAlerts(alerts) {
+      alertsEl.innerHTML = '';
+      alerts.forEach(a => {
+        const badge = document.createElement('span');
+        badge.className = 'alert-badge';
+        badge.textContent = a.replace(/_/g, ' ');
+        alertsEl.appendChild(badge);
+      });
+    }
+
+    // ── Camera ────────────────────────────────────────────────────────────────
+    async function startCamera() {
+      try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 640 } },
+          audio: false,
+        });
+        video.srcObject = cameraStream;
+        await video.play();
+        log('Camera started (rear lens)');
+      } catch (e) {
+        log(`Camera error: ${e.message}`);
+      }
+    }
+
+    function captureFrame() {
+      if (!video.videoWidth) return null;
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      // Return base64 JPEG (strip data URL prefix)
+      return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+    }
+
+    // ── Send frame via WS ─────────────────────────────────────────────────────
+    function sendFrame(b64) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { log('WS not open'); return; }
+      lastImageB64 = b64;
+      ws.send(JSON.stringify({ type: 'frame', image: b64, mode }));
+    }
+
+    // ── Snap button ───────────────────────────────────────────────────────────
+    btnSnap.addEventListener('click', async () => {
+      const b64 = captureFrame();
+      if (!b64) { log('No camera frame available'); return; }
+      sendFrame(b64);
+      log('Frame sent');
+    });
+
+    // ── Auto stream toggle ────────────────────────────────────────────────────
+    btnStream.addEventListener('click', () => {
+      streaming = !streaming;
+      if (streaming) {
+        btnStream.textContent = '⏹ Stop stream';
+        btnStream.style.borderColor = '#6ee7b7';
+        streamTimer = setInterval(() => {
+          const b64 = captureFrame();
+          if (b64) sendFrame(b64);
+        }, 2500);
+        log('Auto stream started (every 2.5s)');
+      } else {
+        btnStream.textContent = '▶ Auto stream';
+        btnStream.style.borderColor = '#333';
+        clearInterval(streamTimer);
+        log('Auto stream stopped');
+      }
+    });
+
+    // ── Ask button ────────────────────────────────────────────────────────────
+    btnAsk.addEventListener('click', () => {
+      const question = questionInput.value.trim();
+      if (!question) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) { log('WS not open'); return; }
+      ws.send(JSON.stringify({ type: 'question', text: question }));
+      log(`Question sent: ${question}`);
+      questionInput.value = '';
+    });
+
+    questionInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') btnAsk.click();
+    });
+
+    // ── Mode buttons ──────────────────────────────────────────────────────────
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        mode = btn.dataset.mode;
+        log(`Mode: ${mode}`);
+      });
+    });
+
+    // ── TTS via Web Speech API (fallback when ElevenLabs audio not streamed) ──
+    function speakText(text) {
+      if (!('speechSynthesis' in window)) return;
+      // Only use browser TTS if audio player has no src (ElevenLabs not wired up)
+      if (audioPlayer.src) return;
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.rate = 1.05;
+      utt.pitch = 1;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utt);
+    }
+
+    // ── Boot ──────────────────────────────────────────────────────────────────
+    connectWS();
+    startCamera();
+    log('SightLine bridge ready');
+  </script>
+</body>
+</html>

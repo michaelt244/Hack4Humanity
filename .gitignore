@@ -1,0 +1,28 @@
+# Secrets — NEVER commit these
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Captured frames
+capture/frames/
+*.jpg
+*.jpeg
+*.png
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
