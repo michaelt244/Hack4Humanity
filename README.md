@@ -1,8 +1,8 @@
 # SightLine
 
-Real-time vision assistant for blind people using Meta Ray-Ban glasses and WhatsApp video calls.
+Real-time vision assistant for blind people using Meta Ray-Ban glasses.
 
-A friend on a phone calls the blind user via WhatsApp. The caregiver's phone screen is shared to this browser dashboard, which captures frames and sends them to an AI vision model. Descriptions are spoken aloud in real time.
+A friend on a phone calls the blind user via video. The caregiver's phone screen is shared to this browser dashboard, which captures frames and sends them to an AI vision model. Descriptions are spoken aloud in real time.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ python server.py --engine gemini --voice elevenlabs
 python server.py --engine amd|gemini --voice mac|elevenlabs|none --focus general|ocr|navigation|safety --port 8080
 ```
 
-Open `http://localhost:8080/`, click **Start**, share the WhatsApp window.
+Open `http://localhost:8080/`, click **Start**, share the window.
 
 ## AMD webhook (optional)
 
