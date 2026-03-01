@@ -1,25 +1,28 @@
 """
 run_sightline.py — SightLine main loop
 
-Continuously screenshots a screen region, describes it via Gemini Flash,
-converts to speech via ElevenLabs, and plays audio through system output.
+Continuously screenshots a screen region, describes it via LLaVA on AMD Cloud
+(with automatic Gemini Flash fallback), converts to speech via ElevenLabs,
+and plays audio through system output.
 
 Usage:
     python capture/run_sightline.py
     python capture/run_sightline.py --mode ask
     python capture/run_sightline.py --interval 5 --focus navigation
-    python capture/run_sightline.py --focus safety
+    python capture/run_sightline.py --engine gemini
 
 Flags:
-    --mode auto|ask     auto = continuous loop, ask = press Enter each time (default: auto)
-    --interval N        seconds between captures in auto mode (default: 3)
+    --mode auto|ask         auto = continuous loop, ask = press Enter each time (default: auto)
+    --interval N            seconds between captures in auto mode (default: 3)
     --focus general|ocr|navigation|safety  (default: general)
+    --engine amd|gemini     vision backend; amd auto-falls back to gemini (default: amd)
 
 Dependencies:
-    pip install mss Pillow google-genai elevenlabs python-dotenv
+    pip install mss Pillow google-genai elevenlabs python-dotenv httpx
 """
 
 import argparse
+import base64
 import io
 import os
 import subprocess
@@ -29,6 +32,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import mss
 from PIL import Image
 from dotenv import load_dotenv
@@ -37,6 +41,12 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+
+# ── AMD Cloud config ───────────────────────────────────────────────────────────
+AMD_ENDPOINT = "http://165.245.140.111:8000/v1/chat/completions"
+AMD_HEALTH_URL = "http://165.245.140.111:8000/health"
+AMD_MODEL = "llava-hf/llava-v1.6-mistral-7b-hf"
+AMD_TIMEOUT = 15.0
 
 # ── Screen region — update these to match your setup ──────────────────────────
 # Run `python capture/find_region.py` then `python capture/test_region.py` to verify.
@@ -111,7 +121,34 @@ def capture_frame() -> Image.Image:
     return img
 
 
-def describe_image(image: Image.Image, prompt: str) -> str:
+def image_to_b64(image: Image.Image) -> str:
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def describe_image_amd(image: Image.Image, prompt: str) -> str:
+    b64 = image_to_b64(image)
+    payload = {
+        "model": AMD_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        "max_tokens": 100,
+        "temperature": 0.3,
+    }
+    resp = httpx.post(AMD_ENDPOINT, json=payload, timeout=AMD_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def describe_image_gemini(image: Image.Image, prompt: str) -> str:
     from google import genai
 
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -120,6 +157,14 @@ def describe_image(image: Image.Image, prompt: str) -> str:
         contents=[prompt, image],
     )
     return response.text.strip()
+
+
+def amd_health_check() -> bool:
+    try:
+        resp = httpx.get(AMD_HEALTH_URL, timeout=5.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def is_similar(prev: str, curr: str, threshold: float = 0.70) -> bool:
@@ -154,28 +199,51 @@ def speak(text: str):
     os.unlink(tmp_path)
 
 
-def process_frame(prompt: str, last_description: str) -> str:
-    """Capture → describe → (maybe) speak. Returns the new description."""
+def process_frame(prompt: str, last_description: str, engine: str, state: dict) -> str:
+    """Capture → describe → (maybe) speak. Returns the new description.
+
+    state: {"fallback_remaining": int} — mutable, updated in place.
+    """
     t0 = time.time()
     timestamp = datetime.now().strftime("%H:%M:%S")
 
     print(f"[{timestamp}] Capturing frame...")
     image = capture_frame()
 
-    print(f"[{timestamp}] Sending to Gemini...")
-    description = describe_image(image, prompt)
+    description = None
+    used_engine = None
+
+    # Decide whether to hit AMD or go straight to Gemini this round.
+    use_gemini = engine == "gemini" or state["fallback_remaining"] > 0
+
+    if not use_gemini:
+        try:
+            print(f"[{timestamp}] Sending to AMD...")
+            description = describe_image_amd(image, prompt)
+            used_engine = "AMD"
+        except Exception:
+            print("⚠️ AMD failed, falling back to Gemini...")
+            state["fallback_remaining"] = 3
+            use_gemini = True
+
+    if use_gemini:
+        if state["fallback_remaining"] > 0:
+            state["fallback_remaining"] -= 1
+        print(f"[{timestamp}] Sending to Gemini...")
+        description = describe_image_gemini(image, prompt)
+        used_engine = "GEMINI"
 
     latency_ms = int((time.time() - t0) * 1000)
 
     if description == "SKIP":
-        print(f"[{timestamp}] Model returned SKIP — nothing notable ({latency_ms}ms)\n")
+        print(f"[{timestamp}] [{used_engine}] SKIP — nothing notable ({latency_ms}ms)\n")
         return last_description
 
     if is_similar(last_description, description):
         print(f"[{timestamp}] Scene unchanged — skipping ({latency_ms}ms)\n")
         return last_description
 
-    print(f"[{timestamp}] ({latency_ms}ms) {description}\n")
+    print(f"[{timestamp}] [{used_engine}] ({latency_ms}ms) {description}\n")
 
     speak(description)
     return description
@@ -188,14 +256,27 @@ def main():
     parser.add_argument("--mode", choices=["auto", "ask"], default="auto")
     parser.add_argument("--interval", type=float, default=3.0)
     parser.add_argument("--focus", choices=["general", "ocr", "navigation", "safety"], default="general")
+    parser.add_argument("--engine", choices=["amd", "gemini"], default="amd",
+                        help="Vision backend: amd (default, auto-falls back to gemini) or gemini")
     args = parser.parse_args()
 
     check_env()
 
+    # Fallback state: how many remaining requests to route to Gemini before retrying AMD.
+    state = {"fallback_remaining": 0}
+
+    # Startup health check (only relevant when AMD is the preferred engine).
+    if args.engine == "amd":
+        if amd_health_check():
+            print("🟢 AMD Cloud connected — using LLaVA on AMD Instinct GPU")
+        else:
+            print("⚠️ AMD unreachable — starting with Gemini fallback")
+            state["fallback_remaining"] = 3
+
     prompt = PROMPTS[args.focus]
     last_description = ""
 
-    print(f"[SightLine] Mode: {args.mode} | Focus: {args.focus}", end="")
+    print(f"[SightLine] Mode: {args.mode} | Focus: {args.focus} | Engine: {args.engine}", end="")
     if args.mode == "auto":
         print(f" | Interval: {args.interval}s")
     else:
@@ -205,13 +286,13 @@ def main():
     try:
         if args.mode == "auto":
             while True:
-                last_description = process_frame(prompt, last_description)
+                last_description = process_frame(prompt, last_description, args.engine, state)
                 time.sleep(args.interval)
 
         else:  # ask mode
             while True:
                 input("Press Enter to capture a frame (Ctrl+C to quit)...")
-                last_description = process_frame(prompt, last_description)
+                last_description = process_frame(prompt, last_description, args.engine, state)
 
     except KeyboardInterrupt:
         print("\n[SightLine] Stopped.")
