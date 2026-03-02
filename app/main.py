@@ -4,11 +4,7 @@ import argparse
 import asyncio
 import json
 import os
-import queue
-import subprocess
 import sys
-import tempfile
-import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -21,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
+from app.services.tts_service import TTSService
 from app.services.vision_service import VisionService
 from app.vision.vision import PROMPTS
 
@@ -30,17 +27,11 @@ GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 WEBHOOK_UPLOAD_URL = os.getenv("WEBHOOK_UPLOAD_URL", "").strip()
 
-VOICE_ID      = "21m00Tcm4TlvDq8ikWAM"  # Rachel
-TTS_MODEL     = "eleven_turbo_v2_5"
-OUTPUT_FORMAT = "mp3_44100_128"
-
 latest_frame_b64: str            = ""
 log_entries:      deque          = deque(maxlen=100)
 ws_clients:       Set[WebSocket] = set()
 _processing_lock: asyncio.Lock   = asyncio.Lock()
 _auto_active:     bool           = True
-_last_spoken_at:  float          = 0.0
-_speech_queue:    queue.Queue    = queue.Queue()
 start_time = time.time()
 
 SPEECH_DEBOUNCE_SECS = 2.0
@@ -61,70 +52,7 @@ state = {
 
 args = None
 vision_service = VisionService(gemini_api_key=GEMINI_API_KEY)
-
-
-_say_process = None
-
-
-def kill_say():
-    """Kill any running Mac 'say' process immediately."""
-    global _say_process
-    if _say_process and _say_process.poll() is None:
-        _say_process.kill()
-        _say_process.wait()
-    _say_process = None
-
-
-def speak_elevenlabs(text: str):
-    from elevenlabs.client import ElevenLabs
-    client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-    audio  = client.text_to_speech.convert(
-        text=text,
-        voice_id=VOICE_ID,
-        model_id=TTS_MODEL,
-        output_format=OUTPUT_FORMAT,
-    )
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-        for chunk in audio:
-            f.write(chunk)
-        tmp_path = f.name
-    subprocess.run(["afplay", tmp_path], check=False)
-    os.unlink(tmp_path)
-
-
-def _speech_worker():
-    """Single background daemon: speaks queued utterances one at a time."""
-    global _say_process, _last_spoken_at
-    while True:
-        text = _speech_queue.get()
-        if not text:
-            _speech_queue.task_done()
-            continue
-        try:
-            if args and args.voice == "mac":
-                _say_process = subprocess.Popen(["say", "-r", "210", text])
-                _say_process.wait()
-                _last_spoken_at = time.time()
-            elif args and args.voice == "elevenlabs":
-                speak_elevenlabs(text)
-                _last_spoken_at = time.time()
-        except Exception as e:
-            print(f"[TTS ERROR] {e}")
-        finally:
-            _speech_queue.task_done()
-
-
-def enqueue_speech(text: str, priority: bool = False):
-    """Add text to the TTS queue. Priority (hazard) drains the queue first."""
-    if priority:
-        kill_say()
-        while not _speech_queue.empty():
-            try:
-                _speech_queue.get_nowait()
-                _speech_queue.task_done()
-            except queue.Empty:
-                break
-    _speech_queue.put(text)
+tts_service: TTSService | None = None
 
 
 async def broadcast(entry: dict):
@@ -203,12 +131,14 @@ async def process_frame(b64: str):
 
         is_hazard = any(w in description.lower() for w in HAZARD_WORDS)
         now = time.time()
-        if not is_hazard and not force_speak and (now - _last_spoken_at < SPEECH_DEBOUNCE_SECS):
-            print(f"[VOICE] Debounced ({now - _last_spoken_at:.1f}s since last)")
+        last_spoken_at = tts_service.last_spoken_at if tts_service else 0.0
+        if not is_hazard and not force_speak and (now - last_spoken_at < SPEECH_DEBOUNCE_SECS):
+            print(f"[VOICE] Debounced ({now - last_spoken_at:.1f}s since last)")
             return
 
         print(f"[VOICE] Enqueuing: {description}")
-        enqueue_speech(description, priority=is_hazard)
+        if tts_service:
+            tts_service.enqueue(description, priority=is_hazard)
 
 
 app = FastAPI(title="SightLine", version="3.0")
@@ -223,9 +153,9 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    t = threading.Thread(target=_speech_worker, daemon=True)
-    t.start()
-    print("[TTS] Speech queue worker started")
+    if tts_service:
+        tts_service.start()
+        print("[TTS] Speech queue worker started")
 
 
 @app.post("/upload-frame")
@@ -284,15 +214,9 @@ async def set_mode(request: Request):
 async def pause_auto():
     global _auto_active
     _auto_active = False
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, kill_say)
-    # Drain any pending speech so nothing plays after pause
-    while not _speech_queue.empty():
-        try:
-            _speech_queue.get_nowait()
-            _speech_queue.task_done()
-        except queue.Empty:
-            break
+    if tts_service:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, tts_service.pause)
     print("[AUTO] Paused — voice command mode")
     return JSONResponse({"ok": True, "active": False})
 
@@ -329,7 +253,7 @@ app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")
 
 
 def main():
-    global args
+    global args, tts_service
 
     parser = argparse.ArgumentParser(description="SightLine — vision server")
     parser.add_argument("--engine", choices=["amd", "gemini"], default="amd",
@@ -347,6 +271,7 @@ def main():
     if args.voice == "elevenlabs" and not ELEVENLABS_API_KEY:
         print("[ERROR] ELEVENLABS_API_KEY not set")
         sys.exit(1)
+    tts_service = TTSService(voice=args.voice, elevenlabs_api_key=ELEVENLABS_API_KEY or "")
 
     print()
     print("  ███████╗██╗ ██████╗ ██╗  ██╗████████╗██╗     ██╗███╗   ██╗███████╗")
