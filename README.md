@@ -1,13 +1,8 @@
 # SightLine
 
-SightLine is a real-time vision assistant for blind and low-vision users. It captures live frames from a shared WhatsApp call window, describes the scene with AI vision models, and delivers low-latency voice feedback.
+Real-time vision assistant for blind people using Meta Ray-Ban glasses.
 
-## Why It Matters
-
-- Accessibility-first: prioritizes immediate hazards, orientation, and nearby objects.
-- Real-time loop: continuous frame ingestion, model inference, and spoken guidance.
-- Multi-backend: AMD LLaVA primary path with Gemini fallback support.
-- Voice flexibility: macOS `say`, ElevenLabs, or silent mode.
+A friend on a phone calls the blind user via video. The caregiver's phone screen is shared to this browser dashboard, which captures frames and sends them to an AI vision model. Descriptions are spoken aloud in real time.
 
 ## Architecture
 
@@ -78,7 +73,7 @@ python app/main.py --engine gemini --voice elevenlabs
 python app/main.py --engine amd --voice mac --focus safety --port 8080
 ```
 
-Webhook service:
+Open `http://localhost:8080/`, click **Start**, share the window.
 
 ```bash
 python webhook/webhook_server.py
@@ -101,30 +96,9 @@ python scripts/setup_agent_tool.py --webhook-url https://<public-host>/tools/des
 
 CLI arguments override `.env` defaults.
 
-## Security
-
-- No API keys are hardcoded in source.
-- Secrets are loaded only via environment variables (`app/core/config.py`).
-- `.env` and runtime logs are excluded from version control.
-- Structured logs avoid printing secrets and sensitive tokens.
-
-If a key was previously exposed, rotate it immediately in the provider console.
-
 ## Responsible AI
 
 - Assistive, not autonomous: SightLine provides guidance, not final navigation decisions.
 - Safety-first prompting: outputs prioritize hazards and spatial context.
 - Human-in-the-loop design: intended for caregiver-assisted or user-verified operation.
 - Known limitations: model errors, latency spikes, and low-light scenes can reduce reliability.
-
-Do not use SightLine as the sole source for high-risk mobility decisions.
-
-## Notes for Recruiters
-
-SightLine demonstrates production-minded software engineering across:
-
-- Real-time systems design
-- FastAPI backend architecture
-- Provider-agnostic AI integration
-- Structured logging and config hardening
-- Accessibility-driven product thinking
