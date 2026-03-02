@@ -21,7 +21,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
-from app.vision import vision
+from app.services.vision_service import VisionService
+from app.vision.vision import PROMPTS
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -59,6 +60,7 @@ state = {
 }
 
 args = None
+vision_service = VisionService(gemini_api_key=GEMINI_API_KEY)
 
 
 _say_process = None
@@ -147,34 +149,21 @@ async def process_frame(b64: str):
 
     async with _processing_lock:
         # Skip black / corrupt frames before spending on inference
-        if await asyncio.get_running_loop().run_in_executor(None, vision.is_black_frame, b64):
+        if await asyncio.get_running_loop().run_in_executor(None, vision_service.is_black_frame, b64):
             return
 
         loop   = asyncio.get_running_loop()
         t0     = time.time()
-        prompt = vision.PROMPTS[state["focus_mode"]]
-
-        description = ""
-        used_engine = ""
-        use_gemini  = (args.engine == "gemini") or (state["fallback_remaining"] > 0)
-
-        if not use_gemini:
-            try:
-                description = await loop.run_in_executor(None, vision.describe_amd, b64, prompt)
-                used_engine = "AMD"
-            except Exception as e:
-                print(f"AMD failed ({e}), falling back to Gemini...")
-                state["fallback_remaining"] = 3
-                use_gemini = True
-
-        if use_gemini:
-            if state["fallback_remaining"] > 0:
-                state["fallback_remaining"] -= 1
-            image       = await loop.run_in_executor(None, vision.b64_to_image, b64)
-            description = await loop.run_in_executor(
-                None, vision.describe_gemini, image, prompt, GEMINI_API_KEY
-            )
-            used_engine = "GEMINI"
+        prompt = vision_service.prompt_for_mode(state["focus_mode"])
+        description, used_engine, fallback_remaining = await loop.run_in_executor(
+            None,
+            vision_service.describe_with_fallback,
+            b64,
+            prompt,
+            args.engine == "gemini",
+            state["fallback_remaining"],
+        )
+        state["fallback_remaining"] = fallback_remaining
 
         latency_ms = int((time.time() - t0) * 1000)
         state["last_latency_ms"] = latency_ms
@@ -186,7 +175,7 @@ async def process_frame(b64: str):
             return
 
         force_speak = state["consecutive_skips"] >= 3
-        if vision.is_similar(state["last_description"], description) and not force_speak:
+        if vision_service.is_similar(state["last_description"], description) and not force_speak:
             state["consecutive_skips"] += 1
             print(f"[{used_engine}] Similar — skipping ({latency_ms}ms) [silent×{state['consecutive_skips']}]")
             return
@@ -284,7 +273,7 @@ async def get_config():
 async def set_mode(request: Request):
     body = await request.json()
     mode = body.get("mode", "")
-    if mode not in vision.PROMPTS:
+    if mode not in PROMPTS:
         return JSONResponse({"ok": False, "error": f"Unknown mode: {mode}"}, status_code=400)
     state["focus_mode"] = mode
     print(f"[MODE] {mode}")
@@ -371,7 +360,7 @@ def main():
     print()
 
     if args.engine == "amd":
-        if vision.amd_available():
+        if vision_service.amd_available():
             print("  AMD Cloud connected — LLaVA on AMD Instinct GPU")
         else:
             print("  AMD unreachable — will fall back to Gemini per request")
